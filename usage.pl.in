@@ -1,0 +1,286 @@
+#!/usr/bin/perl
+
+use strict;
+use Getopt::Long qw(:config require_order);
+
+use constant TRUE		=> 1;
+use constant FALSE		=> 0;
+
+use constant DEBUGGING		=> FALSE;
+
+#
+# Constants and pre-defined arrays
+#
+
+# Error codes and messages
+use constant E_NO_ERROR		=> 0;
+use constant E_NO_WD		=> 1;
+use constant E_NO_WD_OPEN	=> 2;
+use constant E_NO_WD_READ	=> 3;
+use constant E_INVALID_ARGS	=> 4;
+
+our @ErrorMessages = (
+    "No Error",
+    "Can't determine working directory!",
+    "Can't open working directory!",
+    "Can't read working directory!",
+    "Invalid Arguments",
+);
+
+# Base-16 Divisors
+use constant KBYTES		=> 1024;
+use constant MBYTES		=> 1024 * 1024;
+use constant GBYTES		=> 1024 * 1024 * 1024;
+use constant TBYTES		=> 1024 * 1024 * 1024 * 1024;
+use constant PBYTES		=> 1024 * 1024 * 1024 * 1024 * 1024;
+
+#
+# Global Variables
+#
+
+our $Debugging = DEBUGGING;
+our $ShowHidden = FALSE;
+our $HumanReadable = FALSE;
+our $ReverseSort = FALSE;
+
+our @Prunes = qw(
+    proc
+    afs
+);
+
+#
+# Utility Functions
+#
+
+sub debugprint
+{
+    my $message = $_[0];
+    my @caller_info = caller(1);
+
+    if ( $Debugging ) {
+        my $caller_name = $caller_info[3];
+        $caller_name =~ s/main:://g;
+        my $line = $caller_info[2];
+        printf(STDERR "%s (%s): %s\n", $caller_name, $line, $message);
+    }
+}
+
+sub parse_args
+{
+    my $returnval = E_NO_ERROR;
+
+    debugprint("Entering...");
+
+    my $result = GetOptions (
+        "debug!" => \$Debugging,
+        "all-files!" => \$ShowHidden,
+        "human-readble!" => \$HumanReadable,
+        "reverse-sort!" => \$ReverseSort,
+    );
+
+    if ( $result == 0 ) {
+        $returnval = E_INVALID_ARGS;
+    }
+
+    debugprint("Debugging = " . ($Debugging ? "TRUE" : "FALSE") );
+    debugprint("ShowHidden = " . ($ShowHidden ? "TRUE" : "FALSE") );
+    debugprint("HumanReadable = " . ($HumanReadable ? "TRUE" : "FALSE") );
+    debugprint("ReverseSort = " . ($ReverseSort ? "TRUE" : "FALSE") );
+
+    debugprint("returning " . $ErrorMessages[$returnval] . " (" . $returnval . ")"); 
+    return $returnval;
+}
+
+sub show_items
+{
+    my ($items) = @_;
+
+    my $str = sprintf("%-20s: %15s", "Name", "Size");
+    debugprint($str);
+
+    foreach my $item ( @$items ) {
+        my $str = sprintf("%-20s: %15d", $$item{name}, $$item{size});
+        debugprint($str);
+    }
+}
+
+sub sort_asc
+{
+    return -1 if $$a{size} < $$b{size};
+    return 1 if $$a{size} > $$b{size};
+    return 0;
+}
+
+sub sort_desc
+{
+    return -1 if $$a{size} > $$b{size};
+    return 1 if $$a{size} < $$b{size};
+    return 0;
+}
+
+sub make_human_readable
+{
+    my ($num) = @_;
+
+    if ( $num <= KBYTES ) {
+        return $num;
+    }
+    elsif ( $num <= MBYTES ) {
+        return sprintf("%.1fK", ($num / KBYTES));
+    }
+    elsif ( $num <= GBYTES ) {
+        return sprintf("%.1fM", ($num / MBYTES ));
+    }
+    elsif ( $num <= TBYTES ) {
+        return sprintf("%.1fG", ($num / GBYTES ));
+    }
+    elsif ( $num <= PBYTES ) {
+        return sprintf("%.1fT", ($num / TBYTES ));
+    }
+}
+
+#
+# Engine
+#
+
+sub read_wd
+{
+    my ($items) = @_;
+    my @dirents;
+    my $wd;
+    my $returnval = E_NO_ERROR;
+
+    debugprint("Entering...");
+
+    if ( $wd = `pwd` ) {
+
+        chomp($wd);
+        debugprint("Working driectory is " . $wd);
+
+        if ( opendir(THISDIR, $wd) ) {
+
+            # Read in the directory...
+            if ( @$items = readdir(THISDIR) ) {
+                debugprint("Read " . scalar(@$items) . " items");
+
+                # Clean up the list and pack it into the hash...
+                my $skippable = FALSE;
+                foreach my $item ( @$items ) {
+                    next if $item eq ".";
+                    next if $item eq "..";
+
+                    # Check to see if the item is pruneable...
+                    foreach my $prune ( @Prunes ) {
+                        if ( $item =~ /^$prune/ ) {
+                            $skippable = TRUE;
+                            last;
+                        }
+                    }
+                    last if $skippable;
+
+                    my %somehash;
+                    $somehash{name} = $item;
+                    push(@dirents, \%somehash);
+                }
+
+                # Save it...
+                @$items = @dirents;
+
+            }
+            else {
+                $returnval = E_NO_WD_READ;
+            }
+
+            closedir(THISDIR);
+
+            debugprint("Delivered " . scalar(@$items) . " items");
+        }
+        else {
+            $returnval = E_NO_WD_OPEN;
+        }
+    }
+    else {
+        $returnval = E_NO_WD;
+    }
+
+    debugprint("Returning " . $ErrorMessages[$returnval]);
+    return $returnval;
+}
+
+sub size_items
+{
+    my ($items) = @_;
+    my $returnval = E_NO_ERROR;
+
+    debugprint("Entering...");
+
+    debugprint("Getting sizes on " . scalar(@$items) . " items...");
+
+    foreach my $item ( @$items ) {
+        $$item{size} = (split(" ", `du -sb "$$item{name}"`))[0];
+    }
+
+    debugprint("Returning " . $ErrorMessages[$returnval]);
+    return $returnval;
+}
+
+sub display_results
+{
+    my ($items) = @_;
+    my @sorted_items;
+    my $returnval = E_NO_ERROR;
+
+    debugprint("Entering...");
+
+    debugprint("Sorting " . scalar(@$items) . " items...");
+    if ( $ReverseSort ) {
+        @sorted_items = sort(sort_desc @$items);
+    }
+    else {
+        @sorted_items = sort(sort_asc @$items);
+    }
+
+    show_items(\@sorted_items);
+
+    foreach my $item ( @sorted_items ) {
+        # Is this a hidden file?
+        if (($$item{name} =~ "^\\.") and not ($ShowHidden)) { next; }
+
+        # If we got this far, it's safe to show this one
+        my $line = sprintf("%s\t%s\n",
+            $HumanReadable ? make_human_readable($$item{size}) : $$item{size},
+            $$item{name}
+        );
+        print($line);
+    }
+
+    debugprint("Returning " . $ErrorMessages[$returnval]);
+    return $returnval;
+}
+
+sub main
+{
+    my $returnval = E_NO_ERROR;
+    my @Items;
+
+    debugprint("Entering...");
+
+    if ( ($returnval = parse_args()) == E_NO_ERROR ) {
+        # make a list of everything here...
+        if ( ($returnval = read_wd(\@Items)) == E_NO_ERROR ) {
+            # size up each item...
+            if ( ($returnval = size_items(\@Items)) == E_NO_ERROR ) {
+                # display the results...
+                $returnval = display_results(\@Items);
+            }
+        }
+    }
+
+    # clean up...
+    debugprint("No cleanup to do!");
+
+    debugprint("Returning " . $ErrorMessages[$returnval]);
+    return $returnval;
+}
+
+exit main();
